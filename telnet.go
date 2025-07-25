@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"math/rand"
 	"net"
 	"os"
 	"runtime"
@@ -271,23 +272,14 @@ func (s *TelnetScanner) statsThread() {
 	}
 }
 
-func (s *TelnetScanner) Run() {
+func (s *TelnetScanner) RunWithTargets(targets []string) {
 	fmt.Printf("Initializing scanner (%d / %d)...\n\n\n", MAX_WORKERS, MAX_QUEUE_SIZE)
 	go s.statsThread()
 
-	stdinDone := make(chan bool)
 	go func() {
-		reader := bufio.NewReader(os.Stdin)
-		hostCount := 0
-		for {
-			line, err := reader.ReadString('\n')
-			if err != nil {
-				break
-			}
-			host := line[:len(line)-1]
+		for _, host := range targets {
 			if host != "" {
 				atomic.AddInt64(&s.queueSize, 1)
-				hostCount++
 				select {
 				case s.hostQueue <- host:
 				default:
@@ -296,8 +288,7 @@ func (s *TelnetScanner) Run() {
 				}
 			}
 		}
-		fmt.Printf("Finished reading input: %d hosts queued\n", hostCount)
-		stdinDone <- true
+		s.done <- true
 	}()
 
 	for i := 0; i < MAX_WORKERS; i++ {
@@ -305,10 +296,9 @@ func (s *TelnetScanner) Run() {
 		go s.worker()
 	}
 
-	<-stdinDone
+	<-s.done
 	close(s.hostQueue)
 	s.wg.Wait()
-	s.done <- true
 
 	scanned := atomic.LoadInt64(&s.scanned)
 	valid := atomic.LoadInt64(&s.valid)
@@ -331,9 +321,24 @@ func main() {
 	fmt.Println("\n\n\nShift / Riven Telnet scanner")
 	fmt.Printf("Total CPU cores: %d\n", runtime.NumCPU())
 
+	// baca stdin sekali
+	var targets []string
+	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line != "" {
+			targets = append(targets, line)
+		}
+	}
+	if len(targets) == 0 {
+		fmt.Println("[!] No targets found in stdin. Exiting.")
+		return
+	}
+	fmt.Printf("[*] Loaded %d targets from stdin\n", len(targets))
+
 	for {
-		scanner := NewTelnetScanner()
-		scanner.Run()
+		s := NewTelnetScanner()
+		s.RunWithTargets(targets)
 		fmt.Println("[!] Scanner cycle completed, restarting in 3 seconds...")
 		time.Sleep(3 * time.Second)
 	}
